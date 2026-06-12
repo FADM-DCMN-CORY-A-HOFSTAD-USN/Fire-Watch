@@ -1,18 +1,23 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
 
 namespace GenetecEdwardsBridge
 {
     public class FireDetectionEngine
     {
         // Adjustable parameters for site tuning
-        private const int RedThreshold = 190;        // Minimum intensity for the Red channel (0-255)
         private const double TriggerPercentage = 1.5; // Trigger alarm if more than 1.5% of the frame contains fire
+        
+        // Path tracking to the NJIT / Multicore / CUDA Python processor script
+        private readonly string _pythonScriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fire_cuda_engine.py");
 
         /// <summary>
-        /// Analyzes a raw bitmap frame using color spectrum equations.
-        /// Returns true if a fire trigger threshold is crossed.
+        /// Extracts raw pixel matrices and streams them into the CUDA-accelerated Numba Python pipeline.
+        /// Returns true if a fire trigger threshold condition is mathematically satisfied.
         /// </summary>
         public unsafe bool AnalyzeFrameForFire(Bitmap frame, out double flameDensity)
         {
@@ -21,65 +26,74 @@ namespace GenetecEdwardsBridge
 
             int width = frame.Width;
             int height = frame.Height;
-            int totalPixels = width * height;
-            int firePixelCount = 0;
 
-            // Lock bitmap bits into system RAM for lightning-fast direct pointer processing
+            // 1. Lock bitmap bits into system RAM for swift array translation
             BitmapData bitmapData = frame.LockBits(
                 new Rectangle(0, 0, width, height), 
                 ImageLockMode.ReadOnly, 
                 PixelFormat.Format24bppRgb
             );
 
+            // Calculate exact size and extract raw unmanaged memory bytes into a managed array container
+            int totalByteCount = bitmapData.Stride * height;
+            byte[] rawImageBytes = new byte[totalByteCount];
+            Marshal.Copy(bitmapData.Scan0, rawImageBytes, 0, totalByteCount);
+            
+            // Crucial: Unlock bits immediately to maintain strict life-safety memory efficiency and prevent OS leaks
+            frame.UnlockBits(bitmapData);
+
             try
             {
-                byte* currentLine = (byte*)bitmapData.Scan0;
-                int bytesPerPixel = 3; // 24bpp format has 3 bytes per pixel (BGR)
-
-                for (int y = 0; y < height; y++)
+                // 2. Configure an ultra-low overhead Python process wrapper
+                ProcessStartInfo startInfo = new ProcessStartInfo
                 {
-                    for (int x = 0; x < width; x++)
+                    FileName = "python.exe",
+                    // Pass dimensions as command line flags so the Python side knows exactly how to slice the incoming byte stream
+                    Arguments = $"`"{_pythonScriptPath}`" --width {width} --height {height}",
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (Process process = Process.Start(startInfo))
+                {
+                    if (process != null)
                     {
-                        // Extract individual BGR channels via byte pointer manipulation
-                        int b = currentLine[x * bytesPerPixel];
-                        int g = currentLine[x * bytesPerPixel + 1];
-                        int r = currentLine[x * bytesPerPixel + 2];
-
-                        // --- EQUATION 1: Standard RGB Fire Spectrum Thresholds ---
-                        // Rule: Red must be greater than Green, which must be greater than Blue.
-                        bool passesRgbRule = (r > g) && (g > b) && (r > RedThreshold);
-
-                        if (passesRgbRule)
+                        // 3. Directly stream the binary byte matrix over the pipeline stdin channel to bypass overhead constraints
+                        using (BinaryWriter streamWriter = new BinaryWriter(process.StandardInput.BaseStream))
                         {
-                            // --- EQUATION 2: YCbCr Space Mathematical Conversion ---
-                            // Convert RGB to standard ITU-R BT.601 YCbCr values
-                            double yVal  = (0.299 * r) + (0.587 * g) + (0.114 * b);
-                            double cbVal = (-0.1687 * r) - (0.3313 * g) + (0.5 * b) + 128;
-                            double crVal = (0.5 * r) - (0.4187 * g) - (0.0813 * b) + 128;
+                            streamWriter.Write(rawImageBytes);
+                            streamWriter.Flush();
+                        }
 
-                            // Rule: Fire has high luminance (Y) and strong red chrominance (Cr) relative to blue (Cb)
-                            bool passesChrominanceRule = (yVal >= cbVal) && (crVal >= cbVal);
-
-                            if (passesChrominanceRule)
+                        // 4. Capture the calculated density scalar passed back by Numba/CUDA via stdout
+                        string outputResult = process.StandardOutput.ReadLine();
+                        
+                        if (!string.IsNullOrWhiteSpace(outputResult) && double.TryParse(outputResult, out double parsedDensity))
+                        {
+                            flameDensity = parsedDensity;
+                        }
+                        else
+                        {
+                            // Capture standard execution error logs if Python outputs execution structural issues
+                            string operationalErrors = process.StandardError.ReadToEnd();
+                            if (!string.IsNullOrWhiteSpace(operationalErrors))
                             {
-                                firePixelCount++;
+                                Trace.WriteLine($"CUDA Python processing loop stderr warning: {operationalErrors}");
                             }
                         }
                     }
-                    // Move pointer forward to the start of the next scan line entry row
-                    currentLine += bitmapData.Stride;
                 }
             }
-            finally
+            catch (Exception ex)
             {
-                // Crucial: Unlock bits immediately to prevent OS memory leaks
-                frame.UnlockBits(bitmapData);
+                Trace.WriteLine($"Critical hardware acceleration handoff pipeline failure: {ex.Message}");
+                return false;
             }
 
-            // Calculate the density percentage of fire in the frame
-            flameDensity = ((double)firePixelCount / totalPixels) * 100.0;
-
-            // Return true if the calculated density crosses the plant engineering trigger threshold
+            // 5. Evaluate if density percentage crosses the plant engineering trigger threshold boundaries
             return flameDensity >= TriggerPercentage;
         }
     }

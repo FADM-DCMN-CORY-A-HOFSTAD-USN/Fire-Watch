@@ -1,4 +1,11 @@
 
+# Fire-Watch
+
+Hardware-accelerated, low-overhead middleware bridge linking Genetec Security Center live video streams with the Edwards FireWorks incident platform.
+
+## Project Overview
+**Fire-Watch** is an enterprise-grade life-safety integration service designed to process live surveillance video matrices for real-time fire and smoke detection. By combining high-performance managed code (`C#/.NET`) with hardware-accelerated processing layers (`CUDA Python` and `Numba JIT`), the system analyzes unmanaged memory pixel buffers with minimal CPU overhead, routing life-safety alerts directly into the **Edwards FireWorks** incident management platform.
+
 ## Core Architecture & Technical Features
 *   **Dual-Engine Analytics Layer:** 
     *   `fire_cuda_engine.py`: Leverages native NVIDIA GPU kernels via CUDA Python to execute parallel pixel matrix operations for rapid visual flame and structural smoke parsing.
